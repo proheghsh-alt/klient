@@ -1,0 +1,470 @@
+name: Build Zorbix 1.8.9 Renderer
+
+on:
+  workflow_dispatch:
+  push:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Setup Java 8
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '8'
+
+      - name: Create project
+        shell: bash
+        run: |
+          set -e
+          mkdir -p src/main/java/com/zorbix/render
+
+          cat > settings.gradle <<'EOF'
+          rootProject.name = 'Zorbix-1.8.9-Renderer'
+          EOF
+
+          cat > build.gradle <<'EOF'
+          plugins {
+              id 'java'
+          }
+
+          group = 'com.zorbix'
+          version = '1.0.0'
+
+          repositories {
+              mavenCentral()
+          }
+
+          dependencies {
+              implementation 'org.ow2.asm:asm:9.7'
+              implementation 'org.ow2.asm:asm-commons:9.7'
+          }
+
+          java {
+              sourceCompatibility = JavaVersion.VERSION_8
+              targetCompatibility = JavaVersion.VERSION_8
+          }
+
+          tasks.withType(JavaCompile).configureEach {
+              options.encoding = 'UTF-8'
+          }
+
+          jar {
+              archiveBaseName = 'Zorbix-1.8.9-Renderer'
+
+              manifest {
+                  attributes(
+                      'Premain-Class': 'com.zorbix.render.ZorbixAgent',
+                      'Can-Redefine-Classes': 'true',
+                      'Can-Retransform-Classes': 'true'
+                  )
+              }
+
+              from {
+                  configurations.runtimeClasspath.collect {
+                      it.isDirectory() ? it : zipTree(it)
+                  }
+              }
+
+              duplicatesStrategy = DuplicatesStrategy.EXCLUDE
+          }
+          EOF
+
+          cat > src/main/java/com/zorbix/render/ZorbixAgent.java <<'EOF'
+          package com.zorbix.render;
+
+          import java.lang.instrument.Instrumentation;
+
+          public final class ZorbixAgent {
+              private ZorbixAgent() {}
+
+              public static void premain(String args, Instrumentation instrumentation) {
+                  ZorbixConfig.load();
+                  instrumentation.addTransformer(new ZorbixTransformer(), true);
+              }
+          }
+          EOF
+
+          cat > src/main/java/com/zorbix/render/ZorbixConfig.java <<'EOF'
+          package com.zorbix.render;
+
+          import java.io.File;
+          import java.io.FileInputStream;
+          import java.io.FileOutputStream;
+          import java.util.Properties;
+
+          public final class ZorbixConfig {
+              public static boolean fastRender = true;
+              public static boolean clouds = false;
+              public static boolean weather = false;
+              public static boolean minimalParticles = true;
+              public static long chunkBudgetMs = 4L;
+              public static long uploadBudgetMs = 2L;
+
+              private ZorbixConfig() {}
+
+              public static void load() {
+                  try {
+                      File dir = new File(
+                          System.getProperty("user.home"),
+                          ".minecraft/config"
+                      );
+
+                      if (!dir.exists()) {
+                          dir.mkdirs();
+                      }
+
+                      File file = new File(dir, "zorbix.properties");
+
+                      if (!file.exists()) {
+                          save(file);
+                          return;
+                      }
+
+                      Properties p = new Properties();
+
+                      FileInputStream in = new FileInputStream(file);
+                      try {
+                          p.load(in);
+                      } finally {
+                          in.close();
+                      }
+
+                      fastRender = bool(p, "fastRender", fastRender);
+                      clouds = bool(p, "clouds", clouds);
+                      weather = bool(p, "weather", weather);
+                      minimalParticles =
+                          bool(p, "minimalParticles", minimalParticles);
+
+                      chunkBudgetMs =
+                          number(p, "chunkBudgetMs", chunkBudgetMs);
+
+                      uploadBudgetMs =
+                          number(p, "uploadBudgetMs", uploadBudgetMs);
+
+                  } catch (Throwable ignored) {
+                  }
+              }
+
+              private static boolean bool(
+                      Properties p,
+                      String key,
+                      boolean fallback) {
+                  return Boolean.parseBoolean(
+                      p.getProperty(key, String.valueOf(fallback))
+                  );
+              }
+
+              private static long number(
+                      Properties p,
+                      String key,
+                      long fallback) {
+                  try {
+                      return Long.parseLong(
+                          p.getProperty(key, String.valueOf(fallback))
+                      );
+                  } catch (Throwable ignored) {
+                      return fallback;
+                  }
+              }
+
+              private static void save(File file) {
+                  try {
+                      Properties p = new Properties();
+
+                      p.setProperty("fastRender", "true");
+                      p.setProperty("clouds", "false");
+                      p.setProperty("weather", "false");
+                      p.setProperty("minimalParticles", "true");
+                      p.setProperty("chunkBudgetMs", "4");
+                      p.setProperty("uploadBudgetMs", "2");
+
+                      FileOutputStream out =
+                          new FileOutputStream(file);
+
+                      try {
+                          p.store(out, "Zorbix 1.8.9");
+                      } finally {
+                          out.close();
+                      }
+                  } catch (Throwable ignored) {
+                  }
+              }
+          }
+          EOF
+
+          cat > src/main/java/com/zorbix/render/ZorbixRender.java <<'EOF'
+          package com.zorbix.render;
+
+          public final class ZorbixRender {
+              private static long terrainDeadline;
+              private static long uploadDeadline;
+
+              private ZorbixRender() {}
+
+              public static void beginTerrain() {
+                  terrainDeadline =
+                      System.nanoTime()
+                      + Math.max(1L, ZorbixConfig.chunkBudgetMs)
+                      * 1000000L;
+              }
+
+              public static boolean terrainTimeRemaining() {
+                  return terrainDeadline == 0L
+                      || System.nanoTime() < terrainDeadline;
+              }
+
+              public static void beginUploads() {
+                  uploadDeadline =
+                      System.nanoTime()
+                      + Math.max(1L, ZorbixConfig.uploadBudgetMs)
+                      * 1000000L;
+              }
+
+              public static boolean uploadTimeRemaining() {
+                  return uploadDeadline == 0L
+                      || System.nanoTime() < uploadDeadline;
+              }
+
+              public static long clampDeadline(long original) {
+                  long budget =
+                      Math.max(1L, ZorbixConfig.chunkBudgetMs)
+                      * 1000000L;
+
+                  long zorbixDeadline =
+                      System.nanoTime() + budget;
+
+                  if (original <= 0L) {
+                      return zorbixDeadline;
+                  }
+
+                  return Math.min(original, zorbixDeadline);
+              }
+
+              public static boolean renderClouds() {
+                  return ZorbixConfig.clouds;
+              }
+
+              public static boolean renderWeather() {
+                  return ZorbixConfig.weather;
+              }
+
+              public static boolean minimalParticles() {
+                  return ZorbixConfig.minimalParticles;
+              }
+          }
+          EOF
+
+          cat > src/main/java/com/zorbix/render/ZorbixTransformer.java <<'EOF'
+          package com.zorbix.render;
+
+          import java.lang.instrument.ClassFileTransformer;
+          import java.security.ProtectionDomain;
+
+          import org.objectweb.asm.ClassReader;
+          import org.objectweb.asm.ClassVisitor;
+          import org.objectweb.asm.ClassWriter;
+          import org.objectweb.asm.MethodVisitor;
+          import org.objectweb.asm.Opcodes;
+          import org.objectweb.asm.Type;
+
+          import org.objectweb.asm.commons.AdviceAdapter;
+          import org.objectweb.asm.commons.Method;
+
+          public final class ZorbixTransformer
+                  implements ClassFileTransformer {
+
+              private static boolean is(
+                      String name,
+                      String deobf,
+                      String obf) {
+                  return deobf.equals(name) || obf.equals(name);
+              }
+
+              @Override
+              public byte[] transform(
+                      ClassLoader loader,
+                      String className,
+                      Class<?> classBeingRedefined,
+                      ProtectionDomain protectionDomain,
+                      byte[] bytes) {
+
+                  if (className == null || bytes == null) {
+                      return null;
+                  }
+
+                  final boolean entityRenderer =
+                      is(
+                          className,
+                          "net/minecraft/client/renderer/EntityRenderer",
+                          "buq"
+                      );
+
+                  final boolean renderGlobal =
+                      is(
+                          className,
+                          "net/minecraft/client/renderer/RenderGlobal",
+                          "bfr"
+                      );
+
+                  final boolean dispatcher =
+                      is(
+                          className,
+                          "net/minecraft/client/renderer/chunk/ChunkRenderDispatcher",
+                          "bho"
+                      );
+
+                  if (!entityRenderer
+                          && !renderGlobal
+                          && !dispatcher) {
+                      return null;
+                  }
+
+                  try {
+                      ClassReader reader =
+                          new ClassReader(bytes);
+
+                      ClassWriter writer =
+                          new ClassWriter(
+                              reader,
+                              ClassWriter.COMPUTE_MAXS
+                                  | ClassWriter.COMPUTE_FRAMES
+                          );
+
+                      ClassVisitor visitor =
+                          new ClassVisitor(
+                              Opcodes.ASM9,
+                              writer) {
+
+                              @Override
+                              public MethodVisitor visitMethod(
+                                      int access,
+                                      String name,
+                                      String descriptor,
+                                      String signature,
+                                      String[] exceptions) {
+
+                                  MethodVisitor parent =
+                                      super.visitMethod(
+                                          access,
+                                          name,
+                                          descriptor,
+                                          signature,
+                                          exceptions
+                                      );
+
+                                  if (renderGlobal
+                                          && descriptor.equals("(J)V")) {
+
+                                      return new AdviceAdapter(
+                                          Opcodes.ASM9,
+                                          parent,
+                                          access,
+                                          name,
+                                          descriptor) {
+
+                                          @Override
+                                          protected void onMethodEnter() {
+                                              invokeStatic(
+                                                  Type.getType(
+                                                      ZorbixRender.class
+                                                  ),
+                                                  new Method(
+                                                      "clampDeadline",
+                                                      "(J)J"
+                                                  )
+                                              );
+                                          }
+                                      };
+                                  }
+
+                                  if (dispatcher
+                                          && descriptor.equals("(J)Z")) {
+
+                                      return new AdviceAdapter(
+                                          Opcodes.ASM9,
+                                          parent,
+                                          access,
+                                          name,
+                                          descriptor) {
+
+                                          @Override
+                                          protected void onMethodEnter() {
+                                              invokeStatic(
+                                                  Type.getType(
+                                                      ZorbixRender.class
+                                                  ),
+                                                  new Method(
+                                                      "beginUploads",
+                                                      "()V"
+                                                  )
+                                              );
+                                          }
+                                      };
+                                  }
+
+                                  if (entityRenderer
+                                          && descriptor.equals(
+                                              "(FIFJ)V"
+                                          )) {
+
+                                      return new AdviceAdapter(
+                                          Opcodes.ASM9,
+                                          parent,
+                                          access,
+                                          name,
+                                          descriptor) {
+
+                                          @Override
+                                          protected void onMethodEnter() {
+                                              invokeStatic(
+                                                  Type.getType(
+                                                      ZorbixRender.class
+                                                  ),
+                                                  new Method(
+                                                      "beginTerrain",
+                                                      "()V"
+                                                  )
+                                              );
+                                          }
+                                      };
+                                  }
+
+                                  return parent;
+                              }
+                          };
+
+                      reader.accept(
+                          visitor,
+                          ClassReader.EXPAND_FRAMES
+                      );
+
+                      return writer.toByteArray();
+
+                  } catch (Throwable ignored) {
+                      return null;
+                  }
+              }
+          }
+          EOF
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.8'
+
+      - name: Build
+        run: gradle build --no-daemon
+
+      - name: Verify JAR
+        run: |
+          test -f build/libs/Zorbix-1.8.9-Renderer.jar
+          jar tf build/libs/Zorbix-1.8.9-Renderer.jar | grep -E 'ZorbixAgent|ZorbixTransformer'
+
+      - name: Upload Zorbix
+        uses: actions/upload-artifact@v4
+        with:
+          name: Zorbix-1.8.9-Renderer
+          path: build/libs/Zorbix-1.8.9-Renderer.jar
