@@ -53,6 +53,7 @@ jobs:
 
           jar {
               archiveBaseName = 'Zorbix-1.8.9-Renderer'
+              archiveFileName = 'Zorbix-1.8.9-Renderer.jar'
 
               manifest {
                   attributes(
